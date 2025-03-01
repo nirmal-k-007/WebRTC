@@ -13,15 +13,17 @@ const firebaseConfig = {
     measurementId: "G-PXR951TSRB"
 };
 
-// Extract parameters from URL
+
 const urlParams = new URLSearchParams(window.location.search);
-const type = urlParams.get('type');
+
+const type = urlParams.get('type')
+
 const sender = urlParams.get('sender');
 const receiver = urlParams.get('receiver');
 const name = urlParams.get('name');
-const caller = urlParams.get('caller');
+const caller = urlParams.get('caller')
+// document.getElementById("name").innerHTML = receiver 
 
-document.getElementById("receiver").innerHTML = receiver ? receiver : caller;
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
@@ -29,7 +31,9 @@ const firestore = getFirestore(app);
 
 const servers = {
     iceServers: [
-        { urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
+        {
+            urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
+        },
     ],
     iceCandidatePoolSize: 10,
 };
@@ -37,159 +41,245 @@ const servers = {
 // Global State
 const pc = new RTCPeerConnection(servers);
 let localStream = null;
-let remoteStream = new MediaStream();
+let remoteStream = null;
 
 // HTML elements
 const webcamVideo = document.getElementById('webcamVideo');
 const remoteVideo = document.getElementById('remoteVideo');
 const hangupButton = document.getElementById('hangupButton');
-const toggleVideoButton = document.getElementById('toggleVideoButton');
-const toggleAudioButton = document.getElementById('toggleAudioButton');
-const changeSpeaker = document.getElementById('speaker');
-const changeCamera = document.getElementById('rotatecamera');
+const cameraButton = document.getElementById('cameraButton');
+const toggleCamera = document.getElementById('toggleCamera');
 
-// Default camera mode
-let currentFacingMode = "user"; // "user" = front, "environment" = rear
-let currentOutputDevice = "default"; // Default audio output
 
-// Start the webcam
-async function startWebcam() {
-    try {
-        localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: currentFacingMode }, audio: true });
-        webcamVideo.srcObject = localStream;
-        remoteVideo.srcObject = remoteStream;
 
-        // Push tracks to peer connection
-        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+cameraButton.addEventListener("click", function () {
+    const icon = cameraButton.querySelector("i");
+    const videoTrack = localStream.getVideoTracks()[0]; // Get video track
 
-        // Pull tracks from remote stream
-        pc.ontrack = (event) => {
-            event.streams[0].getTracks().forEach(track => remoteStream.addTrack(track));
-        };
-    } catch (error) {
-        console.error("Error accessing camera/microphone:", error);
+    if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled; // Toggle track
+
+        // Toggle icon
+        icon.classList.toggle("fa-video");
+        icon.classList.toggle("fa-video-slash");
+    }
+});
+
+async function checkRearCamera() {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoDevices = devices.filter(device => device.kind === "videoinput");
+
+    // Find a rear camera
+    const rearCamera = videoDevices.find(device => device.label.toLowerCase().includes("back") || device.label.toLowerCase().includes("rear"));
+
+    if (!rearCamera) {
+        // Disable the button and change icon if no rear camera is found
+        toggleCamera.disabled = true;
+    } else {
+        toggleCamera.dataset.rearCameraId = rearCamera.deviceId; // Store the rear camera ID for later
     }
 }
 
-// 1. Call Setup (Make a Call)
+// Run the check when the page loads
+checkRearCamera();
+
+toggleCamera.addEventListener("click", async function () {
+    // Get list of media devices
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoDevices = devices.filter(device => device.kind === "videoinput");
+
+    if (videoDevices.length < 2) {
+        console.log("Rear camera not available");
+        return; // No second camera available
+    }
+
+    // Determine the currently used camera
+    const currentDeviceId = localStream.getVideoTracks()[0].getSettings().deviceId;
+    let newDeviceId = null;
+
+    // Find the rear camera (or switch to the next available)
+    for (const device of videoDevices) {
+        if (device.deviceId !== currentDeviceId) {
+            newDeviceId = device.deviceId;
+            break;
+        }
+    }
+
+    if (!newDeviceId) {
+        console.log("No alternate camera found");
+        return;
+    }
+
+    try {
+        // Get new stream from selected camera
+        const newStream = await navigator.mediaDevices.getUserMedia({
+            video: { deviceId: { exact: newDeviceId } },
+            audio: true
+        });
+
+        // Replace the existing video track in RTCPeerConnection
+        const videoTrack = newStream.getVideoTracks()[0];
+        const sender = pc.getSenders().find(s => s.track.kind === 'video');
+
+        if (sender) sender.replaceTrack(videoTrack);
+
+        // Stop previous camera stream
+        localStream.getTracks().forEach(track => track.stop());
+
+        // Update localStream
+        localStream = newStream;
+        webcamVideo.srcObject = newStream;
+    } catch (error) {
+        console.error("Error switching camera:", error);
+    }
+});
+
+
+localStream = await navigator.mediaDevices.getUserMedia({
+    video: true,
+    audio: true
+});
+remoteStream = new MediaStream();
+
+// Push tracks from local stream to peer connection
+localStream.getTracks().forEach((track) => {
+    pc.addTrack(track, localStream);
+});
+
+// Pull tracks from remote stream, add to video stream
+pc.ontrack = (event) => {
+    event.streams[0].getTracks().forEach((track) => {
+        remoteStream.addTrack(track);
+    });
+};
+
+webcamVideo.srcObject = localStream;
+remoteVideo.srcObject = remoteStream;
+
+cameraButton
+
+
+// 2. Create an offer
 async function makeCall() {
+    // Reference Firestore collections for signaling
     const callDocRef = doc(collection(firestore, 'calls'));
     const offerCandidatesRef = collection(callDocRef, 'offerCandidates');
     const answerCandidatesRef = collection(callDocRef, 'answerCandidates');
+    console.log("Clicked")
 
-    console.log("Making a call...");
-
+    // Get candidates for caller, save to db
     pc.onicecandidate = (event) => {
-        if (event.candidate) addDoc(offerCandidatesRef, event.candidate.toJSON());
+        if (event.candidate) {
+            addDoc(offerCandidatesRef, event.candidate.toJSON());
+        }
     };
 
+    // Create offer
     const offerDescription = await pc.createOffer();
     await pc.setLocalDescription(offerDescription);
 
-    await setDoc(callDocRef, { offer: { sdp: offerDescription.sdp, type: offerDescription.type } });
-    await setDoc(doc(firestore, 'users', receiver), { callid: callDocRef.id }, { merge: true });
+    const offer = {
+        sdp: offerDescription.sdp,
+        type: offerDescription.type,
+    };
 
+    await setDoc(callDocRef, { offer });
+
+    const receiverDocRef = doc(firestore, 'users', receiver);
+    await setDoc(receiverDocRef, { callid: callDocRef.id }, { merge: true });
+
+    // Listen for remote answer
     onSnapshot(callDocRef, (snapshot) => {
         const data = snapshot.data();
         if (!pc.currentRemoteDescription && data?.answer) {
-            pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+            const answerDescription = new RTCSessionDescription(data.answer);
+            pc.setRemoteDescription(answerDescription);
         }
     });
 
+    // When answered, add candidate to peer connection
     onSnapshot(answerCandidatesRef, (snapshot) => {
         snapshot.docChanges().forEach((change) => {
-            if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+            if (change.type === 'added') {
+                const candidate = new RTCIceCandidate(change.doc.data());
+                pc.addIceCandidate(candidate);
+            }
         });
     });
 
     hangupButton.disabled = false;
+};
+
+if (type === "send") {
+    makeCall();
 }
 
-// 2. Answer Call
+// 3. Answer the call with the unique ID
 async function answerCall() {
+
     const senderDocRef = doc(firestore, 'users', name);
+
+    // Fetch the call ID from sender's document
     const senderDocSnap = await getDoc(senderDocRef);
     if (!senderDocSnap.exists()) {
         console.error("Sender document does not exist!");
         return;
     }
 
-    const callId = senderDocSnap.data().callid;
+    const callId = senderDocSnap.data().callid; // Fetch call ID
     if (!callId) {
         console.error("No call ID found in sender's document!");
         return;
     }
 
-    console.log("Answering call:", callId);
+    console.log(callId);
+
     const callDocRef = doc(firestore, 'calls', callId);
     const answerCandidatesRef = collection(callDocRef, 'answerCandidates');
     const offerCandidatesRef = collection(callDocRef, 'offerCandidates');
 
     pc.onicecandidate = (event) => {
-        if (event.candidate) addDoc(answerCandidatesRef, event.candidate.toJSON());
+        if (event.candidate) {
+            addDoc(answerCandidatesRef, event.candidate.toJSON());
+        }
     };
 
     const callData = (await getDoc(callDocRef)).data();
-    await pc.setRemoteDescription(new RTCSessionDescription(callData.offer));
+
+    const offerDescription = callData.offer;
+    await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
 
     const answerDescription = await pc.createAnswer();
     await pc.setLocalDescription(answerDescription);
 
-    await updateDoc(callDocRef, { answer: { type: answerDescription.type, sdp: answerDescription.sdp } });
+    const answer = {
+        type: answerDescription.type,
+        sdp: answerDescription.sdp,
+    };
+
+    await updateDoc(callDocRef, { answer });
 
     onSnapshot(offerCandidatesRef, (snapshot) => {
         snapshot.docChanges().forEach((change) => {
-            if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+            if (change.type === 'added') {
+                let data = change.doc.data();
+                pc.addIceCandidate(new RTCIceCandidate(data));
+            }
         });
     });
+};
+
+if (type === "receive") {
+    hangupButton.disabled = false
+    answerCall()
 }
 
-// 3. Handle Call Type
-if (type === "send") makeCall();
-if (type === "receive") answerCall();
-
-// 4. Toggle Video
-toggleVideoButton.onclick = () => {
-    const videoTrack = localStream.getVideoTracks()[0];
-    if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        toggleVideoButton.innerHTML = videoTrack.enabled ? '<i class="fa-solid fa-video-slash"></i>' : '<i class="fa-solid fa-video"></i>';
-    }
-};
-
-// 5. Toggle Audio
-toggleAudioButton.onclick = () => {
-    const audioTrack = localStream.getAudioTracks()[0];
-    if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        toggleAudioButton.innerHTML = audioTrack.enabled ? '<i class="fa-solid fa-microphone-slash"></i>' : '<i class="fa-solid fa-microphone"></i>';
-    }
-};
-
-// 6. Switch Camera (Front ↔ Rear)
-changeCamera.onclick = async () => {
-    currentFacingMode = currentFacingMode === "user" ? "environment" : "user";
-    await startWebcam();
-};
-
-// 7. Switch Speaker (Earpiece ↔ Loudspeaker)
-changeSpeaker.onclick = async () => {
-    const audioElement = document.getElementById("remoteVideo");
-    if (audioElement.setSinkId) {
-        currentOutputDevice = currentOutputDevice === "default" ? "speaker" : "default";
-        await audioElement.setSinkId(currentOutputDevice);
-        console.log("Audio output switched to:", currentOutputDevice);
-    } else {
-        console.warn("setSinkId() is not supported in this browser.");
-    }
-};
-
-// 8. Hang Up
+// Hang up the call
 hangupButton.onclick = () => {
     pc.close();
-    localStream.getTracks().forEach(track => track.stop());
+    webcamButton.disabled = false;
+    callButton.disabled = true;
+    answerButton.disabled = true;
     hangupButton.disabled = true;
+    localStream.getTracks().forEach(track => track.stop());
 };
-
-// Start the webcam when the page loads
-startWebcam();
