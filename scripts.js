@@ -136,7 +136,7 @@ toggleCamera.addEventListener("click", async function () {
 
 
 localStream = await navigator.mediaDevices.getUserMedia({
-    video: true,
+    video: { facingMode: { exact: "environment" } },
     audio: true
 });
 remoteStream = new MediaStream();
